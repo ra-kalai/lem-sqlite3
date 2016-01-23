@@ -23,6 +23,18 @@
 #include <lem.h>
 #include <sqlite3.h>
 
+enum {
+	BIND_NUMBER = LUA_TNUMBER,
+	BIND_TEXT = LUA_TSTRING,
+	BIND_NULL = LUA_TNIL,
+	BIND_INT = 0xff00,
+	BIND_INT64,
+	BIND_BLOB,
+	BIND_BLOB64,
+	BIND_ZEROBLOB,
+	BIND_ZEROBLOB64,
+};
+
 struct db {
 	struct lem_async a;
 	lua_State *T;
@@ -160,6 +172,9 @@ pushrow(lua_State *T, sqlite3_stmt *stmt)
 	while (i < columns) {
 		switch (sqlite3_column_type(stmt, i)) {
 		case SQLITE_INTEGER:
+			lua_pushinteger(T, sqlite3_column_int64(stmt, i));
+			break;
+
 		case SQLITE_FLOAT:
 			lua_pushnumber(T, sqlite3_column_double(stmt, i));
 			break;
@@ -183,6 +198,100 @@ pushrow(lua_State *T, sqlite3_stmt *stmt)
 }
 
 static int
+_bind_arg(lua_State *T, int t_idx, sqlite3_stmt *stmt, int s_idx)
+{
+	int ret = 0;
+	int kind = lua_type(T, t_idx);
+
+kind_is_known:
+
+	switch (kind) {
+	case LUA_TNIL:
+		/* Should nil mean NULL..
+		ret = sqlite3_bind_null(stmt, i-1);
+		break;
+		..or don't bind.. */
+		return SQLITE_OK;
+
+	case LUA_TNUMBER:
+		ret = sqlite3_bind_double(stmt, s_idx,
+				lua_tonumber(T, t_idx));
+		break;
+
+	case LUA_TSTRING:
+		{
+			size_t len;
+			const char *str = lua_tolstring(T, t_idx, &len);
+
+			ret = sqlite3_bind_text(stmt, s_idx,
+					str, len, SQLITE_STATIC);
+		}
+		break;
+
+	case BIND_INT:
+		ret = sqlite3_bind_int(stmt, s_idx,
+				lua_tointeger(T, t_idx));
+		break;
+
+	case BIND_INT64:
+		ret = sqlite3_bind_int(stmt, s_idx,
+				lua_tointeger(T, t_idx));
+		break;
+
+	case BIND_BLOB:
+		{
+			size_t len;
+			const char *str = lua_tolstring(T, t_idx, &len);
+
+			ret = sqlite3_bind_blob(stmt, s_idx,
+					str, len, SQLITE_STATIC);
+		}
+		break;
+
+	case BIND_BLOB64:
+		{
+			size_t len;
+			const char *str = lua_tolstring(T, t_idx, &len);
+
+			ret = sqlite3_bind_blob64(stmt, s_idx,
+					str, len, SQLITE_STATIC);
+		}
+		break;
+
+	case BIND_ZEROBLOB:
+			ret = sqlite3_bind_zeroblob(stmt, s_idx,
+					lua_tointeger(T, t_idx));
+		break;
+
+	case BIND_ZEROBLOB64:
+			ret = sqlite3_bind_zeroblob64(stmt, s_idx,
+					lua_tointeger(T, t_idx));
+		break;
+
+	case LUA_TTABLE:
+		{
+			lua_rawgeti(T, t_idx, 1);
+			kind = lua_tointeger(T, -1);
+			lua_pop(T, 1);
+			lua_rawgeti(T, t_idx, 2);
+
+			t_idx = -1;
+			goto kind_is_known;
+		}
+
+	default:
+		(void)sqlite3_clear_bindings(stmt);
+		return luaL_argerror(T, t_idx, "expected nil, number or string");
+	}
+
+	if (t_idx == -1) {
+		lua_pop(T, 1);
+	}
+
+	return ret;
+}
+
+static int
 bindargs(lua_State *T, sqlite3_stmt *stmt)
 {
 	int top = lua_gettop(T);
@@ -191,33 +300,7 @@ bindargs(lua_State *T, sqlite3_stmt *stmt)
 	for (i = 2; i <= top; i++) {
 		int ret;
 
-		switch (lua_type(T, i)) {
-		case LUA_TNIL:
-			/* Should nil mean NULL..
-			ret = sqlite3_bind_null(stmt, i-1);
-			break;
-			..or don't bind.. */
-			continue;
-
-		case LUA_TNUMBER:
-			ret = sqlite3_bind_double(stmt, i-1,
-					lua_tonumber(T, i));
-			break;
-
-		case LUA_TSTRING:
-			{
-				size_t len;
-				const char *str = lua_tolstring(T, i, &len);
-
-				ret = sqlite3_bind_text(stmt, i-1,
-						str, len, SQLITE_STATIC);
-			}
-			break;
-
-		default:
-			(void)sqlite3_clear_bindings(stmt);
-			return luaL_argerror(T, i, "expected nil, number or string");
-		}
+		ret = _bind_arg(T, i, stmt, i-1);
 
 		if (ret != SQLITE_OK) {
 			(void)sqlite3_clear_bindings(stmt);
@@ -248,32 +331,7 @@ bindtable(lua_State *T, sqlite3_stmt *stmt)
 		else
 			lua_getfield(T, 2, name);
 
-		switch (lua_type(T, 3)) {
-		case LUA_TNIL:
-			/* Should nil mean NULL..
-			ret = sqlite3_bind_null(stmt, i);
-			break;
-			..or don't bind.. */
-			continue;
-
-		case LUA_TNUMBER:
-			ret = sqlite3_bind_double(stmt, i, lua_tonumber(T, 3));
-			break;
-
-		case LUA_TSTRING:
-			{
-				size_t len;
-				const char *str = lua_tolstring(T, 3, &len);
-
-				ret = sqlite3_bind_text(stmt, i,
-						str, len, SQLITE_STATIC);
-			}
-			break;
-
-		default:
-			err = "expected nil, number or string";
-			goto error;
-		}
+		ret = _bind_arg(T, 3, stmt, i);
 
 		if (ret != SQLITE_OK) {
 			err = sqlite3_errmsg(sqlite3_db_handle(stmt));
@@ -619,7 +677,7 @@ db_last_insert_rowid(lua_State *T)
 	if (db->T != NULL)
 		return db_busy(T);
 
-	lua_pushnumber(T, sqlite3_last_insert_rowid(db->handle));
+	lua_pushinteger(T, sqlite3_last_insert_rowid(db->handle));
 	return 1;
 }
 
@@ -635,7 +693,7 @@ db_changes(lua_State *T)
 	if (db->T != NULL)
 		return db_busy(T);
 
-	lua_pushnumber(T, sqlite3_changes(db->handle));
+	lua_pushinteger(T, sqlite3_changes(db->handle));
 	return 1;
 }
 
@@ -706,10 +764,11 @@ db_open_reap(struct lem_async *a)
 		lua_setmetatable(T, -2);
 
 		ret = 1;
+
+		db->T = NULL;
 	}
 
 	lem_queue(T, ret);
-	db->T = NULL;
 }
 
 static int
@@ -737,7 +796,7 @@ db_open(lua_State *T)
 }
 
 #define set_open_constant(L, name) \
-	lua_pushnumber(L, SQLITE_OPEN_##name);\
+	lua_pushinteger(L, SQLITE_OPEN_##name);\
 	lua_setfield(L, -2, #name)
 
 int
@@ -817,6 +876,24 @@ luaopen_lem_sqlite3_core(lua_State *L)
 	set_open_constant(L, READWRITE);
 	set_open_constant(L, CREATE);
 #endif
+
+	lua_createtable(L, 0, 0);
+
+#define set_bind_kind(L, name) \
+	lua_pushinteger(L, BIND_##name);\
+	lua_setfield(L, -2, #name)
+
+	set_bind_kind(L, NUMBER);
+	set_bind_kind(L, TEXT);
+	set_bind_kind(L, NULL);
+	set_bind_kind(L, INT);
+	set_bind_kind(L, INT64);
+	set_bind_kind(L, BLOB);
+	set_bind_kind(L, BLOB64);
+	set_bind_kind(L, ZEROBLOB);
+	set_bind_kind(L, ZEROBLOB64);
+
+	lua_setfield(L, -2, "bindkind");
 
 	return 1;
 }

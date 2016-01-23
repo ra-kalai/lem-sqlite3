@@ -126,6 +126,8 @@ return {
 	Statement    = Statement,
 	open         = open,
 
+	bindkind		 = sqlite3.bindkind,
+
 	NOMUTEX      = sqlite3.NOMUTEX,
 	FULLMUTEX    = sqlite3.FULLMUTEX,
 	SHAREDCACHE  = sqlite3.SHAREDCACHE,
